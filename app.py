@@ -1,4 +1,7 @@
 # app.py
+import sys
+import streamlit as st
+st.write("Python version:", sys.version)
 import streamlit as st
 import os
 import requests
