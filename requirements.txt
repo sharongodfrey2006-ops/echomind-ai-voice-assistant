@@ -3,7 +3,7 @@ sounddevice
 pydub
 openai
 transformers==4.33.3
-torch==2.2.0
+torch==2.1.2
 chromadb
 sentence-transformers==2.2.2
 TTS==0.22.0
