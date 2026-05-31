@@ -3,6 +3,46 @@ import os
 import requests
 import chromadb
 from chromadb.utils import embedding_functions
+from chat_db import save_chat, export_txt, export_json, export_md   # database functions
+import whisper
+import hashlib
+
+# --- PERFORMANCE OPTIMIZATION SETUP ---
+
+# Load Whisper model once (faster transcription)
+def load_whisper_model():
+    return whisper.load_model("base")   # smaller model for speed
+
+whisper_model = load_whisper_model()
+
+# Audio cache dictionary
+audio_cache = {}
+
+def get_audio_hash(file_path):
+    with open(file_path, "rb") as f:
+        data = f.read()
+    return hashlib.md5(data).hexdigest()
+
+def transcribe_audio(file_path):
+    """Transcribe audio with caching to avoid re-processing same file."""
+    file_hash = get_audio_hash(file_path)
+    if file_hash in audio_cache:
+        return audio_cache[file_hash]
+    result = whisper_model.transcribe(file_path)
+    audio_cache[file_hash] = result["text"]
+    return result["text"]
+
+# --- STEP 28: TOKEN MANAGEMENT ---
+def count_tokens(messages):
+    """Approximate token count based on word splits."""
+    return sum(len(m["content"].split()) for m in messages)
+
+def trim_conversation(messages, max_tokens=3000):
+    """Trim oldest messages until under max_tokens."""
+    while count_tokens(messages) > max_tokens and len(messages) > 2:
+        # remove oldest user/assistant message (keep system prompt)
+        messages.pop(1)
+    return messages
 
 # Load OpenRouter API key from environment variables
 openrouter_key = os.getenv("OPENROUTER_API_KEY")
@@ -85,12 +125,17 @@ def handle_command(command):
         print("📝 Summary:", summary)
         return "Summary generated."
 
-    elif cmd == "export chat":
-        docs = conversation_collection.get()["documents"]
-        with open("chat_export.txt", "w", encoding="utf-8") as f:
-            for doc in docs:
-                f.write(doc + "\n")
+    elif cmd == "export txt":
+        export_txt()
         return "Chat exported to chat_export.txt."
+
+    elif cmd == "export json":
+        export_json()
+        return "Chat exported to chat_export.json."
+
+    elif cmd == "export md":
+        export_md()
+        return "Chat exported to chat_export.md."
 
     return None
 
@@ -134,24 +179,34 @@ while True:
         continue
 
     try:
-        # Retrieve ALL stored documents from ChromaDB
-        all_docs = conversation_collection.get()["documents"]
+        # --- PERFORMANCE OPTIMIZATION: Efficient memory retrieval ---
+        results = conversation_collection.query(
+            query_texts=[user_prompt],
+            n_results=5
+        )
 
-        # Limit to last 5 entries
-        last_docs = all_docs[-5:] if all_docs else []
-        previous_context = "\n".join(last_docs)
+        # Flatten list of lists into plain text
+        docs = results.get("documents", [])
+        flat_docs = [doc for sublist in docs for doc in sublist]
+        relevant_context = "\n".join(flat_docs) if flat_docs else ""
 
         # Build messages for OpenRouter using current personality
         messages = [
             {"role": "system", "content": personalities[current_personality]}
         ]
 
-        # Inject memory as assistant role (so AI sees it as its own past responses)
-        if previous_context:
-            messages.append({"role": "assistant", "content": f"{previous_context}"})
+        # Inject relevant memory
+        if relevant_context:
+            messages.append({"role": "assistant", "content": relevant_context})
 
         # Add current user prompt
         messages.append({"role": "user", "content": user_prompt})
+
+        # --- STEP 28: Apply token management ---
+        messages = trim_conversation(messages)
+
+        # Debug: show token count for proof
+        print("🔢 Token count:", count_tokens(messages))
 
         # Send to OpenRouter
         response = requests.post(
@@ -173,6 +228,9 @@ while True:
 
         # 🔎 Inspect stored memory
         print("🔎 Stored documents:", conversation_collection.get())
+
+        # --- Save to SQLite database ---
+        save_chat(user_prompt, ai_text, current_personality)
 
         # --- EMOJI-SAFE TTS FIX ---
         safe_text = ''.join(c for c in ai_text if c.isprintable() and ord(c) < 128)
